@@ -1,0 +1,13 @@
+**/.vscode
+**/.aws-sam
+
+# Python
+**/*/__pycache__
+
+# Terraform
+**/.terraform
+*.tfstates
+terraform.tfvars
+.terraform.lock.hcl
+*.tfstate*
+.venv

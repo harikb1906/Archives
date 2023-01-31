@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SAM Template for a simple lambda script to work with devops
+Transform:
+  - AWS::Serverless-2016-10-31
+Metadata:
+  AWS::Serverless::Function:
+    Name: !Sub "${AWS::StackName}-devops-function"
+
+Parameters:
+  CognitoID:
+    Default: "Cognito"
+    Type: String
+    
+Resources:
+  # LambdaRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: 2012-10-17
+  #       Statement:
+  #         Action: 
+  #           - sts:AssumeRole
+  #         Effect: Allow
+  #         Principal:
+  #           Service:
+  #             - lambda.amazonaws.com
+  #     Description: IAM role for Lambda functions
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+  #       - arn:aws:iam::aws:policy/service-role/AWSLambdaDynamoDBExecutionRole
+  #       - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+  #     # RoleName: "micrologx-devops-lambda-role"
+  #     Path: /micrologx/ 
+  
+  # ApiGateway: # gettoing 403, solution: resourcepolicy
+  #   Type: AWS::Serverless::Api
+
+  TimeLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /path
+            Method: get
+      Handler: index.handler
+      InlineCode: |
+        def handler(event, context):
+          print(True)
+          print("Context: ", context)
+          return {"status": True, "event": event}
+      Runtime: python3.9
+      # Tracing: Active
+
+#----------------------
+# Cron/Event-Scheduler
+#----------------------
+
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule"
+      ScheduleExpression: "cron(0 8 * * ? *)"
+      State: "ENABLED"
+      Targets:
+        -
+          Arn:
+            Fn::GetAtt:
+              - "CognitoBackupScript"
+              - "Arn"
+          Id: "CognitoBackupScript"
+
+# # Cognit0 CronJobs
+#   CognitoBackupScript:
+#     Type: AWS::Serverless::Function
+#     Properties:
+#       FunctionName: !Sub "${AWS::StackName}-BackupCognito"
+#       CodeUri: devops/congitoBackup
+#       Handler: index.handler
+#       Runtime: nodejs16.x
+#       Description: Script for backing up Cognito to S3
+
+#   PermissionForEventsToInvokeLambda:
+#     Type: AWS::Lambda::Permission
+#     Properties:
+#       FunctionName: !Ref "CognitoBackupScript"
+#       Action: "lambda:InvokeFunction"
+#       Principal: "events.amazonaws.com"
+#       SourceArn:
+#         Fn::GetAtt:
+#           - "ScheduledRule"
+#           - "Arn"
+
+#   CronBucket:
+#     Type: AWS::S3::Bucket
+#     DeletionPolicy: Retain
+#     Properties:
+#       VersioningConfiguration:
+#         Status: Enabled
+
+# ---------------
+
+Outputs:
+  # LambdaRoleArn:
+  #   Description: Lambda role arn
+  #   Value: !GetAtt ["LambdaRole", "Arn"]
+
+  TimeLambdaArn:
+    Description: TimeLambda arn
+    Value: !GetAtt [TimeLambda, Arn]

@@ -1,0 +1,25 @@
+version = 0.1
+[inappld]
+[inappld.deploy]
+[inappld.deploy.parameters]
+stack_name = "micrologx-devops-v1"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1uvqcv470yfud"
+s3_prefix = "micrologx-devops-v1"
+region = "eu-west-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_NAMED_IAM"
+parameter_overrides = "CognitoID=\"\\\"CognitoTestId\\\"\""
+image_repositories = []
+tags = "project='devops-lambda' stage='inappld' deployement_method='sam' owner=hkb"
+
+[micrologx]
+[micrologx.deploy]
+[micrologx.deploy.parameters]
+stack_name = "micrologx-devops-v1"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-uexiz4tivlx0"
+s3_prefix = "micrologx-devops-v1"
+region = "ap-south-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_NAMED_IAM"
+parameter_overrides = "CognitoID=\"\\\"CognitoTestId\\\"\""
+image_repositories = []

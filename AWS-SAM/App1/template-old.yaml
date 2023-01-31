@@ -1,0 +1,530 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SAM Template for MicroLogX Rest API v0.0.1 infrastructures
+Transform:
+  - AWS::Serverless-2016-10-31
+Metadata:
+  AWS::Serverless::Application:
+    Name: !Sub "${AWS::StackName}-serverless"
+
+Parameters:
+  AppName:
+    Default: micrologx-api
+    Type: String
+    Description: Application Name. Used for naming resources
+  AppEnvironment:
+    Default: dev
+    Type: String
+    Description: Application Environment. Used for naming resources
+  ApiGatewayStageName:
+    Default: v1
+    Description: Api current Stage, Stage name for the API Gateway
+    Type: String
+  LambdaCanaryType:
+    Type: String
+    Description: Sets the Canary deployment configuration, e.g. LambdaAllAtOnce, LambdaCanary10Percent5Minutes, LambdaLinear10PercentEvery1Minute, etc. See https://docs.aws.amazon.com/codedeploy/latest/userguide/deployment-configurations.html
+    Default: Canary10Percent5Minutes
+  # ResourceNamePrefix:
+  #   Default: "${AWS::StackName}"
+  #   Type: String
+  #   Description: Stack name or module name
+
+# Mappings:
+#   DefaultTags:
+#     - Key: environment
+#       Value: !Ref AppEnvironment
+
+# Metadata
+
+Globals:
+  Function:
+    Timeout: 120
+    Runtime: nodejs16.x
+    Architectures:
+      - x86_64
+    MemorySize: 1024
+    Layers:
+      - !Ref LambdaLayer
+    Environment:
+      Variables:
+        DYNAMODB_TABLE: !Ref MicroLogXTable #"sample table"
+        COGNITO_ID: !Ref MyCognitoUserPool
+        BACKUP_BUCKET_COGNITO: !Ref CognitoBackupsBucket
+        S3_BUCKET_NAME: !Ref MicroLogXBucket #"micrologx-dev"
+        REGION_NAME: !Ref AWS::Region #"us-east-1"
+        AWS_COGNITO_USER_POOL_ID: !Ref MyCognitoUserPool
+        AWS_COGNITO_CLIENT_ID: !Ref MyCognitoUserApiPoolClient
+        AWS_COGNITO_IDENTITY_POLL_ID: ""
+        # FRONT_END_URL: !Sub "http://micrologx-restaurant-app-${AppEnvironment}-website-bucket.s3-website-us-east-1.amazonaws.com"
+
+Resources:
+# -----------
+# IAM Roles
+# -----------
+  # TestRole:
+  #   Type: 'AWS::IAM::Role'
+  #   Properties:
+  #     RoleName: !Sub "${AppName}-${AppEnvironment}-test-role"
+  #     AssumeRolePolicyDocument:
+  #       Version: 2012-10-17
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service:
+  #               - apigateway.amazonaws.com
+  #           Action: 'sts:AssumeRole'
+  #     ManagedPolicyArns:
+  #       - >-
+  #         arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+  #     Path: /
+  #     Tags:
+  #       - Key: project
+  #         Value: !Sub ${AppName}
+  #       - Key: environment
+  #         Value: !Sub ${AppEnvironment}
+
+  CloudWatchRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-cloudwatch-role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - >-
+          arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Path: /
+      # Tags: !Ref Tags
+
+  # Lambda ROle for Lambda Layer
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: cloudwatch
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource:
+                  - "*"
+        - PolicyName: ddbaccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MicroLogXTable}/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MicroLogXTable}"
+        - PolicyName: s3access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub "arn:aws:s3:::${MicroLogXBucket}/*"
+                  - !Sub "arn:aws:s3:::${MicroLogXBucket}"
+
+
+# ------------------
+# Access Log Group
+# ------------------
+  # Lambda accountant log group
+  GatewayAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "${AWS::StackName}-gateway-log-group"
+      # RetentionInDays: 365
+      # Tags: !Ref Tags
+
+
+# ----------------
+# API Gateway
+# ----------------
+  Account:
+    Type: 'AWS::ApiGateway::Account' # To specify role with which ApiGateway uses to push logs
+    Properties:
+      CloudWatchRoleArn: !GetAtt CloudWatchRole.Arn
+      # DependsOn: ExpressApiGateWay
+
+  # Api gateway (May not be needed for Serverless::Function)
+  ExpressApiGateWay:
+    Type: AWS::Serverless::Api
+    Properties:
+      AccessLogSetting:
+        DestinationArn: !GetAtt GatewayAccessLogGroup.Arn
+        Format: >-
+          '{"requestId":"$context.requestId", "requestTime": "$context.requestTime",
+          "cognitoIdentityId": "$context.identity.cognitoIdentityId", "httpMethod":"$context.httpMethod", "path":"$context.path","resourcePath":"$context.resourcePath","status":$context.status,"responseLatency":$context.responseLatency}'
+      Description: !Sub "API Gateway for environment ${AppEnvironment} of project ${AppName}"
+      Name: !Sub "${AWS::StackName}-express-apigateway"
+      StageName: !Ref ApiGatewayStageName
+      BinaryMediaTypes: ["*/*"]
+      TracingEnabled: true # Enable AWS X-Ray to help debug API requests
+      OpenApiVersion: "3.0.1" # this is required so that SAM doesn't create a default stage called Stage
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          # Disable data trace in production to avoid logging customer sensitive information from requests and responses
+          DataTraceEnabled: false
+          LoggingLevel: ERROR
+          MetricsEnabled: true
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+      Auth:
+        ResourcePolicy:
+          CustomStatements:
+            - Effect: Allow
+              Principal: "*"
+              Action: execute-api:Invoke
+              Resource: execute-api:/*/*/*
+        # Authorizers:
+        #   CustomLambdaRequestAuth:
+        #     # Name: !Sub "${AppName}-CustomLambdaRequestAuth-${AppEnvironment}"
+        #     FunctionPayloadType: REQUEST
+        #     FunctionArn:
+        #       !GetAtt CustomAuthorizerFunction.Arn
+        #       # FunctionInvokeRole: arn:aws:iam::123456789012:role/S3Access # OPTIONAL
+        #     Identity:
+        #       # Must specify at least one of Headers, QueryStrings, StageVariables, or Context
+        #       Headers: # OPTIONAL
+        #         - Authorization
+        #   CognitoPoolAuth:
+        #     # Name: !Sub "${AppName}-CognitoPoolAuth-${AppEnvironment}"
+        #     UserPoolArn: !GetAtt MyCognitoUserPool.Arn # Can also accept an array
+        #     # AuthorizationScopes:
+        #     #   - scope1 # List of authorization scopes
+        #     Identity: # OPTIONAL
+        #       Header: 'Authorization' # OPTIONAL; Default: 'Authorization'
+        #       # ValidationExpression: myauthvalidationexpression # OPTIONAL
+      # Tags: !Ref Tags
+
+  # -----------------
+  # Cronjobs
+  # -----------------
+  ScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule"
+      ScheduleExpression: "cron(0 8 * * ? *)"
+      State: "ENABLED"
+      Targets:
+        -
+          Arn:
+            Fn::GetAtt:
+              - "TenantDailyCronJobs"
+              - "Arn"
+          Id: "TenantDailyCronJobs"
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref "TenantDailyCronJobs"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn:
+        Fn::GetAtt:
+          - "ScheduledRule"
+          - "Arn"
+
+# -----------------
+# Lambda functions
+# -----------------
+  # Lambda Layer
+  LambdaLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AWS::StackName}-lambda-layer"
+      Description: !Sub "Lambda layer for ${AWS::StackName}"
+      ContentUri: lambda-layer
+      CompatibleRuntimes:
+        - nodejs16.x
+    Metadata:
+      BuildMethod: nodejs16.x
+
+# Daily CronJobs
+  TenantDailyCronJobs:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-tDailyCron"
+      Handler: tenantDailyCrons.handler
+      Runtime: nodejs12.x
+      Description: All tenants daily cronJobs
+      CodeUri: customLambdas/cronJobs/
+      Events:
+        tenantDailyCronsApi:
+          Type: Api
+          Properties:
+            Path: /tenantDailyCrons
+            Method: GET
+
+  # Express functions
+  ExpressFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-express-function"
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Enabled: true
+        Type: !Ref LambdaCanaryType
+        Alarms:
+          - Ref: ExpressCanaryErrorsAlarm
+      CodeUri: api/
+      Handler: lambda.handler
+      Role: !GetAtt LambdaRole.Arn
+      Events:
+        ExpressFunctionProxy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ExpressApiGateWay
+            Path: "/{proxy+}"
+            Method: ANY
+            # Auth:
+            #  Authorizer: CustomLambdaRequestAuth
+            # authorizerId: !Ref AuthorizersCognitoUserPools
+        ExpressFunctionRoot:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ExpressApiGateWay
+            Path: "/"
+            Method: ANY
+      Tracing: Active
+      # Tags: !Ref Tags
+
+
+# -----------------
+# CloudWatch Alarms
+# -----------------
+  ExpressCanaryErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: "${AWS::StackName}-express-function-alarm"
+      AlarmDescription: Express Lambda function canary errors
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      Dimensions:
+        - Name: Resource
+          Value:
+            Fn::Sub: ${ExpressFunction}:live
+        - Name: FunctionName
+          Value:
+            Ref: ExpressFunction
+        - Name: ExecutedVersion
+          Value:
+            Fn::GetAtt:
+            - ExpressFunction
+            - Version
+            - Version
+
+# -----------------
+# S3 Buckets
+# -----------------
+  MicroLogXBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-backend-bucket"
+      AccessControl: "PublicRead"
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+            AllowedOrigins:
+              - "*"
+            ExposedHeaders:
+              - Date
+            Id: myCORSRuleId1
+            MaxAge: 3600
+          - AllowedHeaders:
+              - x-*
+            AllowedMethods:
+              - DELETE
+            AllowedOrigins:
+              - "*"
+            ExposedHeaders:
+              - Connection
+              - Server
+              - Date
+            Id: myCORSRuleId2
+            MaxAge: 1800
+
+  TimeBucket:
+    Type: "AWS::S3::BUCKET"
+
+# ------------------
+# Cognito User Pool
+# ------------------
+  MyCognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-userpool"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 6
+      # UsernameAttributes:
+      #   - email
+      AliasAttributes:
+        - preferred_username
+      Schema:
+        - AttributeDataType: String
+          Name: roles
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: tenantId
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: tenantName
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: photoId
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: hireDate
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: posNumber
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: recoveryCode
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: userType
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: photoKey
+          Required: false
+          Mutable: true
+      UserPoolTags:
+          project: !Sub "${AppName}"
+          environment: !Sub "${AppEnvironment}"
+          deployment_method: "sam"
+      # UserPoolTags: |
+      #   {
+      #     "project": !Ref AppName,
+      #     "environment": !Ref AppEnvironment,
+      #     "deployment_method": "sam"
+      #   }
+
+# User Pool Client
+  MyCognitoUserApiPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref MyCognitoUserPool
+      # ClientName: !Sub "${AppName}-userPool-apiclient-${AppEnvironment}"
+      ClientName: !Sub "${AWS::StackName}-userpool-client"
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+      # Tags: !Ref Tags
+
+# ------------------
+# DynamoDB
+# ------------------
+  MicroLogXTable:
+    Type: "AWS::DynamoDB::Table"
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-dynamodb-table"
+      AttributeDefinitions:
+        - AttributeName: "PK"
+          AttributeType: "S"
+        - AttributeName: "SK"
+          AttributeType: "S"
+        - AttributeName: "GSI1PK"
+          AttributeType: "S"
+        - AttributeName: "GSI1SK"
+          AttributeType: "S"
+        - AttributeName: "GSI_ROW_TYPE"
+          AttributeType: "S"
+        - AttributeName: "sortOrder"
+          AttributeType: "N"
+      KeySchema:
+        - AttributeName: "PK"
+          KeyType: "HASH"
+        - AttributeName: "SK"
+          KeyType: "RANGE"
+      BillingMode: "PAY_PER_REQUEST"
+      GlobalSecondaryIndexes:
+        - IndexName: "GSI1"
+          KeySchema:
+            - AttributeName: "GSI1PK"
+              KeyType: "HASH"
+            - AttributeName: "GSI1SK"
+              KeyType: "RANGE"
+          Projection:
+            ProjectionType: ALL
+        - IndexName: "GSI_SORT_ORDER"
+          KeySchema:
+            - AttributeName: "PK"
+              KeyType: "HASH"
+            - AttributeName: "sortOrder"
+              KeyType: "RANGE"
+          Projection:
+            ProjectionType: ALL
+        - IndexName: "GSI_ROWTYPE"
+          KeySchema:
+            - AttributeName: "GSI_ROW_TYPE"
+              KeyType: "HASH"
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      # Tags: !Ref Tags
+
+
+# Output Urls
+Outputs:
+  APIurl:
+    Description: API url
+    Value: !Sub "https://${ExpressApiGateWay}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStageName}"
+
+  MyCognitoUserPoolId:
+    Description: UserPool ID
+    Value: !Ref MyCognitoUserPool

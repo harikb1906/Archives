@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: FastAPI on Lambda
+
+
+Resources:
+
+  ApiGW:
+    Type: AWS::Serverless::HttpApi
+
+
+  Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: 'FastAPILambda'
+      CodeUri: app
+      Handler: main.handler
+      Runtime: python3.9
+      Events:
+        HttpApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ApiGW
+            # Method: GET
+            # Path: "/"
+
+
+# FunctionProxy:
+#           Type: Api
+#           Properties:
+#             RestApiId: !Ref ExpressApiGateWay
+#             Path: "/private/{proxy+}"
+#             Method: ANY
+
+
+Outputs:
+  ApiUrl:
+    Description: URL of your API
+    Value:
+      Fn::Sub: 'https://${ApiGW}.execute-api.${AWS::Region}.${AWS::URLSuffix}/'

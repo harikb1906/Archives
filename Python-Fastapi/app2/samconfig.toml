@@ -1,0 +1,11 @@
+version = 0.1
+[default]
+[default.deploy]
+[default.deploy.parameters]
+stack_name = "fast-app-2"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1uvqcv470yfud"
+s3_prefix = "fast-app-2"
+region = "eu-west-1"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+image_repositories = []

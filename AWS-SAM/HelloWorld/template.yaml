@@ -1,0 +1,576 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SAM Template for MicroLogX Rest API v0.0.1 ${AWS::StackName}
+Transform: AWS::Serverless-2016-10-31
+# parameters for the API Gateway
+Parameters:
+  # ResourceNamePrefix:
+  #   Default: "${AWS::StackName}"
+  #   Type: String
+  #   Description: Stack name or module name
+  # Obsolete
+  AppName:
+    Default: micrologx-api
+    Type: String
+    Description: Application Name. Used for naming resources
+  # Obsolete
+  AppEnvironment:
+    Default: dev
+    Type: String
+    # AllowedValues:
+    #   - dev
+    #   - production
+    #   - staging
+    Description: Application Environment. Used for naming resources
+  ApiGatewayStageName:
+    Default: v1
+    Description: Api current Stage, Stage name for the API Gateway
+    Type: String
+
+  LambdaCanaryType:
+    Type: String
+    Description: Sets the Canary deployment configuration, e.g. LambdaAllAtOnce, LambdaCanary10Percent5Minutes, LambdaLinear10PercentEvery1Minute, etc. See https://docs.aws.amazon.com/codedeploy/latest/userguide/deployment-configurations.html
+    Default: Canary10Percent5Minutes
+  
+  Tags:
+    Type: CommaDelimitedList
+    Default: "Key=samT Value=true"
+
+# Mappings:
+#   DefaultTags:
+#     - Key: environment
+#       Value: !Ref AppEnvironment
+
+# Metadata
+Metadata:
+  AWS::Serverless::Application:
+    Name: !Sub "${AWS::StackName}-serverless"
+# Global Configs
+Globals:
+  Function:
+    Timeout: 120
+    Runtime: nodejs16.x
+    Architectures:
+      - x86_64
+    MemorySize: 1024
+    Layers:
+      - !Ref LambdaLayer
+    Environment:
+      Variables:
+        DYNAMODB_TABLE: !Ref MicroLogXTable #"sample table"
+        S3_BUCKET_NAME: !Ref MicroLogXBucket #"micrologx-dev"
+        REGION_NAME: !Ref AWS::Region #"us-east-1"
+        # AWS_ACCESS_KEY: !Ref AWSACCESSKEY
+        # AWS_SECRET_KEY: !Ref AWSSECRETKEY
+
+        AWS_COGNITO_USER_POOL_ID: !Ref MyCognitoUserPool
+        AWS_COGNITO_CLIENT_ID: !Ref MyCognitoUserApiPoolClient
+        AWS_COGNITO_IDENTITY_POLL_ID: ""
+        FRONT_END_URL: "http://micrologx-restaurant-app-demo-website-bucket.s3-website-us-east-1.amazonaws.com"
+
+Resources:
+# -----------
+# IAM Roles
+# -----------
+  CloudWatchRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-cloudwatch-role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - >-
+          arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+      Path: /
+      # Tags: !Ref Tags
+
+  # Lambda ROle for Lambda Layer
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: cloudwatch
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource:
+                  - "*"
+        - PolicyName: ddbaccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource:
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MicroLogXTable}/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MicroLogXTable}"
+        - PolicyName: s3access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - !Sub "arn:aws:s3:::${MicroLogXBucket}/*"
+                  - !Sub "arn:aws:s3:::${MicroLogXBucket}"
+      # Tags: !Ref Tags
+
+# ----------------
+# API Gateway
+# ----------------
+  Account:
+    Type: 'AWS::ApiGateway::Account'
+    Properties:
+      CloudWatchRoleArn: !GetAtt CloudWatchRole.Arn
+      # Tags: !Ref Tags
+  # Api gateway
+  ExpressApiGateWay:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-express-apigateway"
+      StageName: !Ref ApiGatewayStageName
+      BinaryMediaTypes: ["*/*"]
+      AccessLogSetting:
+        DestinationArn: !GetAtt AccessLogGroup.Arn
+        Format: '{"requestTime":"$context.requestTime","requestId":"$context.requestId","httpMethod":"$context.httpMethod","path":"$context.path","resourcePath":"$context.resourcePath","status":$context.status,"responseLatency":$context.responseLatency}'      
+      TracingEnabled: true # Enable AWS X-Ray to help debug API requests
+      OpenApiVersion: "3.0.1" # this is required so that SAM doesn't create a default stage called Stage
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          # Disable data trace in production to avoid logging customer sensitive information from requests and responses
+          DataTraceEnabled: false
+          LoggingLevel: ERROR
+          MetricsEnabled: true
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+      Auth:
+        ResourcePolicy:
+          CustomStatements:
+            - Effect: Allow
+              Principal: "*"
+              Action: execute-api:Invoke
+              Resource: execute-api:/*/*/*
+        # Authorizers:
+        #   CustomLambdaRequestAuth:
+        #     # Name: !Sub "${AppName}-CustomLambdaRequestAuth-${AppEnvironment}"
+        #     FunctionPayloadType: REQUEST
+        #     FunctionArn:
+        #       !GetAtt CustomAuthorizerFunction.Arn
+        #       # FunctionInvokeRole: arn:aws:iam::123456789012:role/S3Access # OPTIONAL
+        #     Identity:
+        #       # Must specify at least one of Headers, QueryStrings, StageVariables, or Context
+        #       Headers: # OPTIONAL
+        #         - Authorization
+        #   CognitoPoolAuth:
+        #     # Name: !Sub "${AppName}-CognitoPoolAuth-${AppEnvironment}"
+        #     UserPoolArn: !GetAtt MyCognitoUserPool.Arn # Can also accept an array
+        #     # AuthorizationScopes:
+        #     #   - scope1 # List of authorization scopes
+        #     Identity: # OPTIONAL
+        #       Header: 'Authorization' # OPTIONAL; Default: 'Authorization'
+        #       # ValidationExpression: myauthvalidationexpression # OPTIONAL
+      # Tags: !Ref Tags
+ 
+
+
+# -----------------
+# Lambda functions
+# -----------------
+  # Lambda Layer
+  LambdaLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      # LayerName: !Sub "${AppName}-lambda-layer-${AppEnvironment}"
+      # Description: !Sub "${AppName} Lambda Layer-${AppEnvironment}"
+      LayerName: !Sub "${AWS::StackName}-lambda-layer"
+      Description: !Sub "${AWS::StackName}- Lambda Layer"
+      ContentUri: lambda-layer
+      CompatibleRuntimes:
+        - nodejs16.x
+      # RetentionPolicy: Retain
+    Metadata:
+      BuildMethod: nodejs16.x
+
+  # Express functions
+  ExpressFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-express-function"
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Enabled: true
+        Type: !Ref LambdaCanaryType
+        Alarms:
+          - Ref: ExpressCanaryErrorsAlarm
+      CodeUri: api/
+      Handler: lambda.handler
+      Role: !GetAtt LambdaRole.Arn
+      Events:
+        ExpressFunctionProxy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ExpressApiGateWay
+            Path: "/{proxy+}"
+            Method: ANY
+            # Auth:
+            #  Authorizer: CustomLambdaRequestAuth
+            # authorizerId: !Ref AuthorizersCognitoUserPools
+        ExpressFunctionRoot:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ExpressApiGateWay
+            Path: "/"
+            Method: ANY
+      # Tags: !Ref Tags
+
+
+# -----------------
+# CloudWatch Alarms
+# -----------------
+  ExpressCanaryErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: "${AWS::StackName}-express-function-alarm"
+      AlarmDescription: Express Lambda function canary errors
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Period: 60
+      Statistic: Sum
+      Threshold: 0
+      Dimensions:
+        - Name: Resource
+          Value:
+            Fn::Sub: ${ExpressFunction}:live
+        - Name: FunctionName
+          Value:
+            Ref: ExpressFunction
+        - Name: ExecutedVersion
+          Value:
+            Fn::GetAtt:
+            - ExpressFunction
+            - Version
+            - Version
+      # Tags: !Ref Tags
+
+# -----------------
+# S3 Buckets
+# -----------------
+  MicroLogXBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-backend-bucket"
+      AccessControl: "PublicRead"
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+            AllowedOrigins:
+              - "*"
+            ExposedHeaders:
+              - Date
+            Id: myCORSRuleId1
+            MaxAge: 3600
+          - AllowedHeaders:
+              - x-*
+            AllowedMethods:
+              - DELETE
+            AllowedOrigins:
+              - "*"
+            ExposedHeaders:
+              - Connection
+              - Server
+              - Date
+            Id: myCORSRuleId2
+            MaxAge: 1800
+      # Tags: !Ref Tags
+
+# ------------------
+# Cognito User Pool
+# ------------------
+  MyCognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-userpool"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 6
+      # UsernameAttributes:
+      #   - email
+      AliasAttributes:
+        - preferred_username
+      Schema:
+        - AttributeDataType: String
+          Name: roles
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: tenantId
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: tenantName
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: photoId
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: hireDate
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: posNumber
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: recoveryCode
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: userType
+          Required: false
+          Mutable: true
+        - AttributeDataType: String
+          Name: photoKey
+          Required: false
+          Mutable: true
+        # - AttributeDataType: String
+        #   Name: assignedRoles
+        #   Required: false
+        #   Mutable: true
+      # Tags: !FindInMap DefaultTags
+      # UserPoolTags
+
+# User Pool Client
+  MyCognitoUserApiPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref MyCognitoUserPool
+      # ClientName: !Sub "${AppName}-userPool-apiclient-${AppEnvironment}"
+      ClientName: !Sub "${AWS::StackName}-userpool-client"
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+      # Tags: !Ref Tags
+
+# ------------------
+# DynamoDB
+# ------------------
+  MicroLogXTable:
+    Type: "AWS::DynamoDB::Table"
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "${AWS::StackName}-dynamodb-table"
+      AttributeDefinitions:
+        - AttributeName: "PK"
+          AttributeType: "S"
+        - AttributeName: "SK"
+          AttributeType: "S"
+        - AttributeName: "GSI1PK"
+          AttributeType: "S"
+        - AttributeName: "GSI1SK"
+          AttributeType: "S"
+        - AttributeName: "GSI_ROW_TYPE"
+          AttributeType: "S"
+        - AttributeName: "sortOrder"
+          AttributeType: "N"
+      KeySchema:
+        - AttributeName: "PK"
+          KeyType: "HASH"
+        - AttributeName: "SK"
+          KeyType: "RANGE"
+      BillingMode: "PAY_PER_REQUEST"
+      GlobalSecondaryIndexes:
+        - IndexName: "GSI1"
+          KeySchema:
+            - AttributeName: "GSI1PK"
+              KeyType: "HASH"
+            - AttributeName: "GSI1SK"
+              KeyType: "RANGE"
+          Projection:
+            ProjectionType: ALL
+        - IndexName: "GSI_SORT_ORDER"
+          KeySchema:
+            - AttributeName: "PK"
+              KeyType: "HASH"
+            - AttributeName: "sortOrder"
+              KeyType: "RANGE"
+          Projection:
+            ProjectionType: ALL
+        - IndexName: "GSI_ROWTYPE"
+          KeySchema:
+            - AttributeName: "GSI_ROW_TYPE"
+              KeyType: "HASH"
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      # Tags: !Ref Tags
+
+
+# ------------------
+# Access Log Group
+# ------------------
+  # Lambda accountant log group
+  AccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "${AWS::StackName}-log-group"
+      # Tags: !Ref Tags
+
+
+# Output Urls
+Outputs:
+  APIurl:
+    Description: API url
+    Value: !Sub "https://${ExpressApiGateWay}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStageName}"
+
+  MyCognitoUserPoolId:
+    Description: UserPool ID
+    Value: !Ref MyCognitoUserPool
+
+  # # custom authorizer
+  # AuthorizersCustomAuthorizer:
+  #   Type: AWS::ApiGateway::Authorizer
+  #   Properties:
+  #     Name: !Sub "${AppName}-customAuth-${AppEnvironment}"
+  #     RestApiId: !Ref ExpressApiGateWay
+  #     Type: CUSTOM
+  #     AuthorizerUri: !GetAtt CustomAuthorizerFunction.Arn
+  #     AuthorizerResultTtlInSeconds: 300
+  #     IdentitySource: 'method.request.header.x-auth-key'
+  #     IdentityValidationExpression: '#method.request.header.x-auth-key'
+  #     ProviderARNs:
+  #       - !GetAtt CustomAuthorizerFunction.Arn
+
+  # # Cognito authorizer
+  # AuthorizersCognitoUserPools:
+  #   Type: AWS::ApiGateway::Authorizer
+  #   Properties:
+  #     Name: !Sub "${AppName}-cognitoAuth-${AppEnvironment}"
+  #     Type: COGNITO_USER_POOLS
+  #     RestApiId: !Ref ExpressApiGateWay
+  #     IdentitySource: method.request.header.x-auth-key
+  #     ProviderARNs:
+  #       - !Ref MyCognitoUserPool
+  # GetData:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     FunctionName: !Sub "${AppName}-get-data"
+  #     Handler: index.handler
+  #     Runtime: nodejs12.x
+  #     Description: Get employee data from Dynamo DB
+  #     CodeUri: functions/
+  #     Events:
+  #       sampleAPi:
+  #         Type: Api
+  #         Properties:
+  #           Path: /hello
+  #           Method: GET
+  # Role:
+  #   Fn::GetAtt: LambdaRole.Arn
+  # PutData:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     FunctionName: !Sub "${AppName}-put-data"
+  #     Handler: index.lambdaHandler
+  #     Runtime: nodejs12.x
+  #     Description: Add employee data to Dynamo DB
+  #     CodeUri: functions/put-data/
+  # Role:
+  #   Fn::GetAtt: LambdaRole.Arn
+
+  # restApiProxy:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     FunctionName: !Sub "${AppName}-proxy-global-nonauth-function"
+  #     CodeUri: functions/
+  #     Handler: index.handler
+  #     Events:
+  #       sampleAPi:
+  #         Type: Api
+  #         Properties:
+  #           Path: "/{proxy+}"
+  #           Method: ANY
+  #           RestApiId: !Ref serverLessApiConfig
+  #     Description: A proxy api for basic crud operations.
+
+  # AuthFunction:
+  #   Type: Api
+  #   Properties:
+  #     RestApiId: !Ref ExpressApiGateWay
+  #     Path: "/auth/{proxy+}"
+  #     Method: ANY
+
+  # serverLessApiConfig:
+  #   Type: AWS::Serverless::Api
+  #   Properties:
+  #     StageName: !Ref ApiGatewayStageName
+  #     Cors:
+  #       AllowMethods: "'*'"
+  #       AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+  #       AllowOrigin: "'*'"
+  #       MaxAge: "'500'"
+  # Auth:
+  #   DefaultAuthorizer: MyCustomCognitoAuthorizer
+  #   Authorizers:
+  #     MyCustomCognitoAuthorizer:
+  #       UserPoolArn: arn:aws:cognito-idp:ap-south-1:151294847163:user pool/ap-south-1_V6BRY pad5
+
+  # lambda Bucket
+
+  # Cors:
+  #   AllowMethods: "'*'"
+  #   # AllowHeaders: "'X-Tenant-Id,Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+  #   AllowHeaders: "'*'"
+  #   AllowOrigin: "'*'"
+  #   AllowCredentials: false
+
+  #   MaxAge: "'500'"
+  # AuthExpressFunctions:
+  #   Type: Api
+  #   Properties:
+  #     RestApiId: !Ref ExpressApiGateWay
+  #     Path: "/auth/{proxy+}"
+  #     Method: ANY
+  #     Auth:
+  #       Authorizer:
+  #         !Ref AuthorizersCustomAuthorizer

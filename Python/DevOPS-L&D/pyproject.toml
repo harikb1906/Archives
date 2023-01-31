@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "python"
+version = "0.1.0"
+description = ""
+authors = ["Harikb <harikrishnan.b@inapp.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+boto3 = "^1.26.20"
+invoke = "^1.7.3"
+requests = "^2.28.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
